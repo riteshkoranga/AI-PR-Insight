@@ -1,0 +1,77 @@
+require("dotenv").config();
+const express = require("express");
+const axios = require("axios");
+const User = require("../model/user");
+// Removed OpenAI import
+// const OpenAI = require("openai");
+const { HfInference } = require("@huggingface/inference"); // Import Hugging Face library
+
+const router = express.Router();
+console.log(process.env.HUGGINGFACE_API_KEY); // Log Hugging Face API key
+
+// Initialize Hugging Face Inference API
+const hf = new HfInference(process.env.HUGGINGFACE_API_KEY); 
+
+router.post("/", async (req, res) => {
+  const event = req.body;
+  console.log(event);
+
+  if (event.action === "opened" && event.pull_request) {
+    const prUrl = event.pull_request.url;
+    const owner = event.repository.owner.login;
+    const repo = event.repository.name;
+    const prNumber = event.pull_request.number;
+    const user = await User.findOne({ githubId: event.sender.id });
+    console.log(prUrl);
+
+    if (user) {
+      const diffUrl = `${prUrl}/files`;
+
+      try {
+        // Fetch PR diff data
+        const prData = await axios.get(diffUrl, {
+          headers: { Authorization: `token ${user.token}` },
+        });
+
+        // Send diff data to Hugging Face for review
+        const aiResponse = await hf.textGeneration({
+          model: "Salesforce/codegen-350M-multi", // Replace with the model you want to use
+          inputs: `Review this PR:\n${JSON.stringify(prData.data)}`,
+          parameters: {
+            max_length: 50,
+          },
+        });
+
+        // Log the AI review response
+        console.log("AI review response:", aiResponse.generated_text); // Update to log the correct response format
+
+        // Post AI review as a comment
+        const commentUrl = `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`;
+        await axios.post(
+          commentUrl,
+          {
+            body: aiResponse.generated_text, // Update to use the correct response from Hugging Face
+          },
+          {
+            headers: { Authorization: `token ${user.token}` },
+          }
+        );
+
+        res.status(200).send("PR reviewed and comment posted.");
+      } catch (error) {
+        console.error("Error processing the PR:", error);
+        res.status(500).send("Error processing the PR.");
+      }
+    } else {
+      console.error("User not found.");
+      res.status(404).send("User not found.");
+    }
+  } else {
+    console.error(
+      "Repository or owner information is missing in the event payload."
+    );
+    res.status(400).send("Repository or owner information is missing.");
+  }
+});
+
+module.exports = router;
